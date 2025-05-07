@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 import networkx as nx
 from copy import deepcopy
 import sys
@@ -7,6 +6,7 @@ from pqdict import pqdict
 from functools import partial
 import time
 import logging
+import pyroaring
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -19,15 +19,16 @@ class Block:
     """
     def __init__(self, block_id, output_neurons, snn=None):
         self.id = block_id
-        self.outputs = set(output_neurons)  # Neurons at this block's outputs
-        self.inputs = set()                 # Combined inputs to these neurons
+        self.outputs = pyroaring.BitMap(output_neurons)  # Neurons at this block's outputs
+        self.inputs = pyroaring.BitMap()                 # Combined inputs to these neurons
         
         # Pre-compute inputs if SNN is provided
         if snn is not None:
             for neuron in self.outputs:
                 # Get all predecessors (inputs) for this neuron
-                predecessors = set(snn.predecessors(neuron))
-                self.inputs.update(predecessors)
+                predecessors = snn.predecessors(neuron)
+                for pred in predecessors:
+                    self.inputs.add(pred)
         
     def __repr__(self):
         return f"Block(id={self.id}, outputs={len(self.outputs)}, inputs={len(self.inputs)})"
@@ -51,8 +52,9 @@ class OptimizedCrossbar:
             return False
         
         # Check if combined inputs fit within crossbar
-        combined_inputs = block_a.inputs.union(block_b.inputs)
-        if len(combined_inputs) > self.crossbar_size:
+        # Use roaring bitmap's fast union operation
+        combined_inputs_len = len(block_a.inputs | block_b.inputs)
+        if combined_inputs_len > self.crossbar_size:
             return False
         
         return True
@@ -106,8 +108,8 @@ class ATLAS:
     
     def _get_terminal_nodes(self, graph):
         """Get input and output neurons of a graph"""
-        root_set = set()
-        leaf_set = set()
+        root_set = pyroaring.BitMap()
+        leaf_set = pyroaring.BitMap()
         
         for node in graph.nodes:
             has_inputs = 0
@@ -133,13 +135,17 @@ class ATLAS:
         Calculate the input overlap score between two blocks
         Using Jaccard similarity (intersection over union)
         """
-        # Use pre-computed input sets from Block objects
-        intersection_size = len(block_a.inputs.intersection(block_b.inputs))
+        # Use roaring bitmap's fast intersection and union operations
+        intersection = block_a.inputs & block_b.inputs
+        intersection_size = len(intersection)
         
         if intersection_size == 0:
             return 0
-            
-        union_size = len(block_a.inputs) + len(block_b.inputs) - intersection_size
+        
+        # Use roaring bitmap's fast union operation    
+        union = block_a.inputs | block_b.inputs
+        union_size = len(union)
+        
         return intersection_size / union_size
     
     def _is_valid_merge(self, block_a_id, block_b_id):
@@ -194,10 +200,12 @@ class ATLAS:
         num_blocks = len(block_ids)
         
         # Create index of inputs to blocks for faster lookup
-        input_to_blocks = {}
+        self.input_to_blocks = {}
         for block_id, block in self.blocks.items():
             for input_neuron in block.inputs:
-                input_to_blocks.setdefault(input_neuron, set()).add(block_id)
+                if input_neuron not in self.input_to_blocks:
+                    self.input_to_blocks[input_neuron] = pyroaring.BitMap()
+                self.input_to_blocks[input_neuron].add(block_id)
         
         # Add edges between blocks that share inputs and can be merged
         edges_added = 0
@@ -211,14 +219,15 @@ class ATLAS:
             if i % 100 == 0:
                 logger.info(f"Building ATLAS graph: {i}/{num_blocks} blocks processed")
                 
-            # Find candidate blocks that share at least one input with this block
-            candidates = set()
+            # Find candidate blocks that share at least one input with this block using BitMaps
+            candidates = pyroaring.BitMap()
             for input_neuron in block_a.inputs:
-                if input_neuron in input_to_blocks:
-                    candidates.update(input_to_blocks[input_neuron])
+                if input_neuron in self.input_to_blocks:
+                    candidates |= self.input_to_blocks[input_neuron]
             
             # Remove current block and already processed blocks
-            candidates = {b for b in candidates if b > block_a_id}
+            # Create a BitMap of range(0, block_a_id + 1) and remove those blocks
+            candidates -= pyroaring.BitMap(range(block_a_id + 1))
             
             # For each candidate block
             for block_b_id in candidates:
@@ -245,11 +254,14 @@ class ATLAS:
         new_block_id = self.next_block_id
         self.next_block_id += 1
         
-        # Create new block without SNN (we'll set inputs directly)
-        new_block = Block(new_block_id, block_a.outputs.union(block_b.outputs))
+        # Create new block without SNN (we'll set inputs and outputs directly)
+        new_block = Block(new_block_id, [])
         
-        # Set inputs directly
-        new_block.inputs = block_a.inputs.union(block_b.inputs)
+        # Set outputs directly using BitMap operations
+        new_block.outputs = block_a.outputs | block_b.outputs
+        
+        # Set inputs directly using BitMap operations
+        new_block.inputs = block_a.inputs | block_b.inputs
         
         # Add new block to our dictionary
         self.blocks[new_block_id] = new_block
@@ -278,8 +290,29 @@ class ATLAS:
         self.atlas_graph.remove_node(block_a_id)
         self.atlas_graph.remove_node(block_b_id)
         
-        # Clear validation cache as it's now invalid
-        self.validation_cache.clear()
+        # Update input_to_blocks index for the new block
+        if hasattr(self, 'input_to_blocks'):
+            for input_neuron in new_block.inputs:
+                if input_neuron in self.input_to_blocks:
+                    self.input_to_blocks[input_neuron].add(new_block_id)
+            
+            # Remove old blocks from input_to_blocks
+            for input_neuron in block_a.inputs:
+                if input_neuron in self.input_to_blocks and block_a_id in self.input_to_blocks[input_neuron]:
+                    self.input_to_blocks[input_neuron].remove(block_a_id)
+            
+            for input_neuron in block_b.inputs:
+                if input_neuron in self.input_to_blocks and block_b_id in self.input_to_blocks[input_neuron]:
+                    self.input_to_blocks[input_neuron].remove(block_b_id)
+        
+        # Selectively invalidate validation cache
+        keys_to_remove = []
+        for key in list(self.validation_cache.keys()):
+            if block_a_id in key or block_b_id in key:
+                keys_to_remove.append(key)
+        
+        for key in keys_to_remove:
+            del self.validation_cache[key]
         
         return new_block_id
     
@@ -300,7 +333,7 @@ class ATLAS:
         
         # Select best non-overlapping edges
         best_merges = []
-        merged_nodes = set()
+        merged_nodes = pyroaring.BitMap()
         
         for edge, weight in sorted_edges:
             u, v = edge
@@ -379,7 +412,8 @@ class ATLAS:
             block = self.blocks[block_id]
             
             # Create a subgraph with all neurons (outputs and inputs)
-            all_neurons = block.outputs.union(block.inputs)
+            # Convert BitMaps to list for networkx
+            all_neurons = list(block.outputs | block.inputs)
             subgraph = self.snn.subgraph(all_neurons).copy()
             
             final_blocks.append(subgraph)
@@ -442,4 +476,4 @@ def main():
 
 
 if __name__ == "__main__":
-   main()
+    main()
