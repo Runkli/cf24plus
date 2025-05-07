@@ -1,0 +1,12 @@
+1. New graph based traversal for pair-merge identification
+2. Faster set operations (avoid intersection calculations etc)
+2.1 Bitmap representations: https://github.com/RoaringBitmap/ (fast and/or ops for intersection/union)
+2.2 Bloom filters: https://en.wikipedia.org/wiki/Bloom_filter
+3. Concurrent operations (edge collapse, largest set of nodes that do not neighbor each other)
+3.1 https://stackoverflow.com/questions/50911284/picking-maximum-number-of-nodes-from-network-so-that-none-are-connected-by-1-deg
+4. Faster operations allow for deeper searches (solution search vs greedy)
+
+
+1. Graph based traversal
+2. Bitmap operations
+3. Deeper search
