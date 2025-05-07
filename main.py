@@ -2,11 +2,13 @@
 import networkx as nx
 from copy import deepcopy
 import sys
-from pqdict import pqdict
-from functools import partial
+import math
+import random
 import time
 import logging
 import pyroaring
+from functools import partial
+from pqdict import pqdict
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -50,7 +52,7 @@ class OptimizedCrossbar:
         # Check if combined outputs fit within crossbar
         if len(block_a.outputs) + len(block_b.outputs) > self.crossbar_size:
             return False
-        
+
         # Check if combined inputs fit within crossbar
         # Use roaring bitmap's fast union operation
         combined_inputs_len = len(block_a.inputs | block_b.inputs)
@@ -105,6 +107,9 @@ class ATLAS:
         
         # Block ID counter
         self.next_block_id = 0
+        
+        # Target cluster count for stopping greedy and switching to SA
+        self.greedy_target = 500
     
     def _get_input_overlap_score(self, block_a, block_b):
         """
@@ -191,8 +196,8 @@ class ATLAS:
             block_a_id = block_ids[i]
             block_a = self.blocks[block_a_id]
             
-            # Print progress every 100 blocks
-            if i % 100 == 0:
+            # Print progress every 1000 blocks
+            if i % 1000 == 0:
                 logger.info(f"Building ATLAS graph: {i}/{num_blocks} blocks processed")
                 
             # Find candidate blocks that share at least one input with this block using BitMaps
@@ -202,7 +207,6 @@ class ATLAS:
                     candidates |= self.input_to_blocks[input_neuron]
             
             # Remove current block and already processed blocks
-            # Create a BitMap of range(0, block_a_id + 1) and remove those blocks
             candidates -= pyroaring.BitMap(range(block_a_id + 1))
             
             # For each candidate block
@@ -291,7 +295,7 @@ class ATLAS:
         Select the best non-overlapping set of merges for this pass
         Returns a list of (block_a_id, block_b_id) pairs
         """
-        # Create dictionary of edges by weight - faster than pqdict
+        # Create dictionary of edges by weight 
         edge_weights = {}
         
         # Add all edges to the dictionary
@@ -335,8 +339,49 @@ class ATLAS:
         
         return len(best_merges), new_blocks
     
+    def _run_greedy_phase(self, target=None, max_passes=None):
+        """
+        Run a greedy phase with an optional target or maximum passes
+        Returns number of merges done
+        """
+        if target is None:
+            target = self.greedy_target
+            
+        total_merges = 0
+        pass_num = 1
+        
+        while True:
+            current_blocks = len(self.atlas_graph.nodes)
+            
+            # Check if we've reached the target
+            if target is not None and current_blocks <= target:
+                logger.info(f"Reached target of {target} clusters.")
+                break
+                
+            # Check if we've reached the maximum number of passes
+            if max_passes is not None and pass_num > max_passes:
+                logger.info(f"Reached maximum number of passes ({max_passes}).")
+                break
+            
+            # Print progress
+            logger.info(f"Greedy pass {pass_num}: Starting with {current_blocks} blocks")
+            
+            # Perform one pass of merging
+            merges_done, _ = self._perform_merge_pass()
+            total_merges += merges_done
+            
+            logger.info(f"Greedy pass {pass_num}: Performed {merges_done} merges, {current_blocks-merges_done} blocks remaining")
+            
+            # If no merges were done, we're done
+            if merges_done == 0:
+                break
+                
+            pass_num += 1
+        
+        return total_merges
+        
     def cluster(self):
-        """Main clustering algorithm"""
+        """Main clustering algorithm - original greedy approach"""
         # Create minimum blocks
         self._create_minimum_blocks()
         
@@ -345,36 +390,12 @@ class ATLAS:
         
         # Perform merging passes until no more merges can be done
         start_time = time.time()
-        total_merges = 0
-        pass_num = 1
         
-        # Initialize stats for progress tracking
-        initial_blocks = len(self.blocks)
-        
-        while True:
-            current_blocks = len(self.atlas_graph.nodes)
-            progress_pct = (initial_blocks - current_blocks) / initial_blocks * 100
-            
-            logger.info(f"Pass {pass_num}: Starting with {current_blocks} blocks ({progress_pct:.2f}% reduction)")
-            
-            pass_start_time = time.time()
-            
-            # Perform one pass of merging
-            merges_done, new_blocks = self._perform_merge_pass()
-            total_merges += merges_done
-            
-            pass_duration = time.time() - pass_start_time
-            
-            logger.info(f"Pass {pass_num}: Performed {merges_done} merges in {pass_duration:.2f}s, {current_blocks-merges_done} blocks remaining")
-            
-            # If no merges were done, we're done
-            if merges_done == 0:
-                break
-                
-            pass_num += 1
+        # Run greedy phase
+        total_merges = self._run_greedy_phase()
         
         self.times['merging'] = time.time() - start_time
-        logger.info(f"Merging complete: {total_merges} total merges in {self.times['merging']:.2f} seconds")
+        logger.info(f"Greedy phase complete: {total_merges} total merges in {self.times['merging']:.2f} seconds")
         
         # Convert final blocks to subgraphs
         final_blocks = []
@@ -404,43 +425,444 @@ class ATLAS:
         }
 
 
+class ATLAS_Alternating(ATLAS):
+    """
+    ATLAS with alternating Greedy and Simulated Annealing phases
+    Inherits most functionality from the original ATLAS
+    """
+    
+    def __init__(self, snn, architecture):
+        """Initialize the ATLAS_Alternating algorithm"""
+        super().__init__(snn, architecture)
+        
+        # SA parameters
+        self.initial_temp = 100.0
+        self.final_temp = 0.1
+        self.alpha = 0.95  # Cooling rate
+        self.iterations_per_temp = 500
+        
+        # Cluster penalty weight for quality function
+        self.cluster_penalty_weight = 20.0
+        
+        # Alternating parameters
+        self.max_alternating_iterations = 5  # Max times to alternate between SA and greedy
+        self.greedy_passes_per_alternation = 3  # Number of greedy passes per alternation
+        
+        # Additional timers
+        self.times['sa_optimization'] = 0
+        self.times['alternating_phases'] = 0
+    
+    def _calculate_solution_quality(self, solution):
+        """
+        Calculate the quality of a solution
+        Higher is better
+        """
+        # Calculate average utilization
+        total_util = 0
+        for block_id in solution:
+            block = self.blocks[block_id]
+            total_util += self.arch.util(block)
+        
+        avg_util = total_util / len(solution) if solution else 0
+        
+        # Penalize number of clusters (we want fewer clusters)
+        # With high penalty weight to encourage more merging
+        num_clusters_penalty = (len(solution) / 100.0) * self.cluster_penalty_weight
+        
+        # The overall quality is utilization minus penalty
+        quality = avg_util - num_clusters_penalty
+        
+        return quality
+    
+    def _get_neighbor_solution(self, current_solution):
+        """
+        Generate a neighbor solution by trying to merge two blocks
+        Uses a biased selection towards high-overlap blocks
+        Returns:
+            new_solution, delta_quality
+        """
+        # Make a copy of the current solution
+        solution_copy = current_solution.copy()
+        
+        # Select two random blocks to try merging
+        if len(solution_copy) < 2:
+            return solution_copy, 0
+        
+        # Instead of purely random selection, bias toward high overlap
+        # This helps find better merges faster
+        if random.random() < 0.7:  # 70% of the time use bias
+            # Find pairs with high overlap
+            block_pairs = []
+            
+            # Limit search to avoid checking all pairs
+            sample_size = min(len(solution_copy), 100)
+            sample_blocks = random.sample(list(solution_copy), sample_size)
+            
+            for block_a_id in sample_blocks:
+                for block_b_id in sample_blocks:
+                    if block_a_id >= block_b_id:
+                        continue
+                    
+                    if self._is_valid_merge(block_a_id, block_b_id):
+                        block_a = self.blocks[block_a_id]
+                        block_b = self.blocks[block_b_id]
+                        overlap = self._get_input_overlap_score(block_a, block_b)
+                        block_pairs.append((block_a_id, block_b_id, overlap))
+            
+            # If we found valid pairs, select one with bias toward higher overlap
+            if block_pairs:
+                # Sort by overlap (highest first)
+                block_pairs.sort(key=lambda x: x[2], reverse=True)
+                
+                # Select from top 10% with higher probability
+                top_n = max(1, int(len(block_pairs) * 0.1))
+                selected_idx = int(random.triangular(0, len(block_pairs)-1, 0))
+                block_a_id, block_b_id, _ = block_pairs[selected_idx]
+            else:
+                # No valid pairs found, select randomly
+                block_a_id, block_b_id = random.sample(list(solution_copy), 2)
+        else:
+            # 30% of the time, pure random selection for exploration
+            block_a_id, block_b_id = random.sample(list(solution_copy), 2)
+        
+        # Check if they can be merged
+        if not self._is_valid_merge(block_a_id, block_b_id):
+            return solution_copy, 0
+        
+        # Calculate current quality
+        current_quality = self._calculate_solution_quality(solution_copy)
+        
+        # Remove the two blocks
+        solution_copy.remove(block_a_id)
+        solution_copy.remove(block_b_id)
+        
+        # Merge them - just create a new block, don't update graph since
+        # we're only exploring SA solutions
+        new_block_id = self.next_block_id
+        self.next_block_id += 1
+        
+        # Create new block without SNN (we'll set inputs and outputs directly)
+        block_a = self.blocks[block_a_id]
+        block_b = self.blocks[block_b_id]
+        new_block = Block(new_block_id, [])
+        
+        # Set outputs and inputs
+        new_block.outputs = block_a.outputs | block_b.outputs
+        new_block.inputs = block_a.inputs | block_b.inputs
+        
+        # Add to blocks dictionary
+        self.blocks[new_block_id] = new_block
+        
+        # Add to solution
+        solution_copy.add(new_block_id)
+        
+        # Calculate new quality
+        new_quality = self._calculate_solution_quality(solution_copy)
+        
+        # Calculate delta quality
+        delta_quality = new_quality - current_quality
+        
+        return solution_copy, delta_quality
+    
+    def _run_sa_phase(self, initial_solution, starting_temp=None):
+        """
+        Run a single SA phase
+        Returns best solution found and whether any improvement was made
+        """
+        start_time = time.time()
+        
+        # Use provided solution as starting point
+        current_solution = initial_solution.copy()
+        best_solution = current_solution.copy()
+        current_quality = self._calculate_solution_quality(current_solution)
+        best_quality = current_quality
+        initial_quality = current_quality
+        
+        logger.info(f"Starting SA phase with {len(current_solution)} blocks, quality: {current_quality:.4f}")
+        
+        # Initialize temperature
+        temp = starting_temp if starting_temp is not None else self.initial_temp
+        
+        # Cooling loop
+        iteration = 0
+        
+        while temp > self.final_temp:
+            accepted_moves = 0
+            improved_moves = 0
+            
+            # Iterations at this temperature
+            for i in range(self.iterations_per_temp):
+                # Get a neighbor solution
+                neighbor_solution, delta_quality = self._get_neighbor_solution(current_solution)
+                
+                # Accept the move if it improves quality or with probability
+                # based on temperature and quality delta
+                if delta_quality > 0 or random.random() < math.exp(delta_quality / temp):
+                    current_solution = neighbor_solution
+                    current_quality += delta_quality
+                    accepted_moves += 1
+                    
+                    if delta_quality > 0:
+                        improved_moves += 1
+                    
+                    # Update best solution if needed
+                    if current_quality > best_quality:
+                        best_solution = current_solution.copy()
+                        best_quality = current_quality
+                
+                iteration += 1
+                
+                # Progress output every 1000 iterations
+                if iteration % 1000 == 0:
+                    logger.info(f"SA iteration {iteration}, Temp: {temp:.2f}, "
+                                f"Accepted: {accepted_moves}, Improved: {improved_moves}, "
+                                f"Current quality: {current_quality:.4f}, "
+                                f"Best quality: {best_quality:.4f}, "
+                                f"Clusters: {len(current_solution)}")
+            
+            # Cool down temperature
+            temp *= self.alpha
+            
+            # Output current state
+            logger.info(f"Temperature: {temp:.2f}, "
+                        f"Accepted moves: {accepted_moves}/{self.iterations_per_temp}, "
+                        f"Improved moves: {improved_moves}, "
+                        f"Current quality: {current_quality:.4f}, "
+                        f"Best quality: {best_quality:.4f}, "
+                        f"Clusters: {len(current_solution)}")
+            
+            # If very few moves were accepted, decrease temp faster
+            if accepted_moves < self.iterations_per_temp * 0.05:
+                temp *= self.alpha  # Cool down faster
+            
+            # Break if we didn't accept any moves
+            if accepted_moves == 0:
+                logger.info("Stopping SA: No moves accepted in this temperature step")
+                break
+        
+        phase_time = time.time() - start_time
+        self.times['sa_optimization'] += phase_time
+        
+        # Check if any improvement was made
+        made_improvement = best_quality > initial_quality
+        
+        logger.info(f"SA phase completed in {phase_time:.2f} seconds. "
+                    f"Made improvement: {made_improvement}, "
+                    f"Initial quality: {initial_quality:.4f}, "
+                    f"Best quality: {best_quality:.4f}, "
+                    f"Reduced from {len(initial_solution)} to {len(best_solution)} clusters")
+        
+        return best_solution, made_improvement
+    
+    def _update_atlas_graph(self, solution):
+        """
+        Update the ATLAS graph to match the given solution
+        Rebuilds edges between nodes in the solution
+        """
+        # First clear the existing graph
+        self.atlas_graph = nx.Graph()
+        
+        # Add the nodes from the solution
+        for block_id in solution:
+            self.atlas_graph.add_node(block_id)
+        
+        # Rebuild edges
+        # For each pair of nodes in the solution
+        nodes = list(solution)
+        for i in range(len(nodes)):
+            for j in range(i+1, len(nodes)):
+                node_i = nodes[i]
+                node_j = nodes[j]
+                
+                # Check if they can be merged
+                if self._is_valid_merge(node_i, node_j):
+                    # Calculate overlap score
+                    block_i = self.blocks[node_i]
+                    block_j = self.blocks[node_j]
+                    overlap_score = self._get_input_overlap_score(block_i, block_j)
+                    
+                    # Add edge with weight based on overlap
+                    self.atlas_graph.add_edge(node_i, node_j, weight=overlap_score)
+        
+        logger.info(f"Updated ATLAS graph with {len(self.atlas_graph.nodes())} nodes and {len(self.atlas_graph.edges())} edges")
+        
+    def cluster(self):
+        """Main clustering algorithm with alternating Greedy and SA phases"""
+        # Create minimum blocks
+        self._create_minimum_blocks()
+        
+        # Build ATLAS graph
+        self._build_atlas_graph()
+        
+        # Run initial greedy phase to get to target
+        start_time = time.time()
+        
+        logger.info(f"Starting initial greedy phase to reach target of {self.greedy_target} clusters")
+        self._run_greedy_phase()
+        
+        # Get current solution
+        current_solution = set(self.atlas_graph.nodes())
+        best_solution = current_solution.copy()
+        best_quality = self._calculate_solution_quality(best_solution)
+        
+        logger.info(f"Initial greedy phase complete with {len(current_solution)} clusters")
+        
+        # Alternating phases
+        alternating_start = time.time()
+        
+        made_improvement = True
+        alternation_count = 0
+        
+        # Continue as long as we're making improvements and haven't exceeded max iterations
+        while made_improvement and alternation_count < self.max_alternating_iterations:
+            alternation_count += 1
+            logger.info(f"Starting alternation {alternation_count}/{self.max_alternating_iterations}")
+            
+            # Run SA phase
+            logger.info("Running SA phase")
+            sa_solution, sa_improved = self._run_sa_phase(current_solution)
+            sa_quality = self._calculate_solution_quality(sa_solution)
+            
+            # Update current solution
+            current_solution = sa_solution
+            
+            # Update best solution if better
+            if sa_quality > best_quality:
+                best_solution = sa_solution.copy()
+                best_quality = sa_quality
+            
+            # Update ATLAS graph with SA solution
+            self._update_atlas_graph(current_solution)
+            
+            # Run greedy phase (limited number of passes)
+            logger.info(f"Running greedy phase with {self.greedy_passes_per_alternation} passes")
+            greedy_merges = self._run_greedy_phase(max_passes=self.greedy_passes_per_alternation)
+            
+            # Get new solution after greedy
+            greedy_solution = set(self.atlas_graph.nodes())
+            greedy_quality = self._calculate_solution_quality(greedy_solution)
+            
+            # Update current solution
+            current_solution = greedy_solution
+            
+            # Update best solution if better
+            if greedy_quality > best_quality:
+                best_solution = greedy_solution.copy()
+                best_quality = greedy_quality
+            
+            # Check if this alternation made any improvement
+            made_improvement = sa_improved or greedy_merges > 0
+            
+            logger.info(f"Alternation {alternation_count} complete: "
+                        f"SA improved: {sa_improved}, "
+                        f"Greedy merges: {greedy_merges}, "
+                        f"Current clusters: {len(current_solution)}, "
+                        f"Best quality: {best_quality:.4f}")
+        
+        self.times['alternating_phases'] = time.time() - alternating_start
+        self.times['total'] = time.time() - start_time
+        
+        # Use the best solution found
+        self._update_atlas_graph(best_solution)
+        
+        # Convert final blocks to subgraphs
+        final_blocks = []
+        for block_id in self.atlas_graph.nodes:
+            block = self.blocks[block_id]
+            
+            # Create a subgraph with all neurons (outputs and inputs)
+            all_neurons = list(block.outputs | block.inputs)
+            subgraph = self.snn.subgraph(all_neurons).copy()
+            
+            final_blocks.append(subgraph)
+        
+        self.merged_blocks = final_blocks
+        logger.info(f"Final solution has {len(final_blocks)} clusters")
+        
+        return final_blocks
+    
+    def get_performance_stats(self):
+        """Get performance statistics"""
+        stats = super().get_performance_stats()
+        stats['sa_optimization_time'] = self.times['sa_optimization']
+        stats['alternating_phases_time'] = self.times['alternating_phases']
+        stats['total_time'] = self.times.get('total', sum(self.times.values()))
+        return stats
+
+
 def main():
     """Example usage with a sample SNN"""
-    # Create a sample SNN
-    snn = nx.DiGraph()
-    
-    # Try to import reader from the provided code
-    from reader import AdarshaReader
-    
-    # ADARSHA MODELS
-    model_name = "LeNet"
-    model_path = f'../disco_libs/SNN_db/{model_name}'
-    conn_file = model_path + '.connection_info.txt' 
-    spk_file = model_path + '.spike_info.txt' 
-    
-    reader = AdarshaReader()
-    model, aer = reader.read(conn_file, spk_file)
-    reader.addTraffic(model, aer)
-    
-    # Use the model as our SNN
-    snn = model
-    logger.info(f"Loaded {model_name} model with {len(snn.nodes())} neurons and {len(snn.edges())} connections")
+    try:
+        # Try to import reader from the provided code
+        from reader import AdarshaReader
+        
+        # ADARSHA MODELS
+        model_name = "LeNet"
+        model_path = f'../disco_libs/SNN_db/{model_name}'
+        conn_file = model_path + '.connection_info.txt' 
+        spk_file = model_path + '.spike_info.txt' 
+        
+        reader = AdarshaReader()
+        model, aer = reader.read(conn_file, spk_file)
+        reader.addTraffic(model, aer)
+        
+        # Use the model as our SNN
+        snn = model
+        logger.info(f"Loaded {model_name} model with {len(snn.nodes())} neurons and {len(snn.edges())} connections")
+    except ImportError:
+        # If reader is not available, create a synthetic SNN for testing
+        logger.info("Reader not found, creating synthetic SNN for testing")
+        snn = nx.DiGraph()
+        
+        # Create a layered network with more connections
+        num_layers = 3
+        neurons_per_layer = [1000, 500, 200]  # More realistic layer sizes
+        connection_prob = 0.05
+        
+        # Create neurons for each layer
+        neuron_id = 0
+        for layer, layer_size in enumerate(neurons_per_layer):
+            for i in range(layer_size):
+                snn.add_node(neuron_id, layer=layer)
+                neuron_id += 1
+        
+        # Create connections between layers
+        for layer in range(len(neurons_per_layer) - 1):
+            source_neurons = [n for n, d in snn.nodes(data=True) if d['layer'] == layer]
+            target_neurons = [n for n, d in snn.nodes(data=True) if d['layer'] == layer + 1]
+            
+            for source in source_neurons:
+                for target in target_neurons:
+                    if random.random() < connection_prob:
+                        snn.add_edge(source, target, traffic=random.randint(1, 10))
+        
+        logger.info(f"Created synthetic SNN with {len(snn.nodes())} neurons and {len(snn.edges())} connections")
     
     # Create the optimized crossbar architecture
-    crossbar_size = 1024
+    crossbar_size = 1024  # Smaller for the example
     arch = OptimizedCrossbar(crossbar_size)
     
-    # Create ATLAS instance
-    atlas = ATLAS(snn, arch)
+    # Create ATLAS instance with alternating phases
+    atlas_alt = ATLAS_Alternating(snn, arch)
+    
+    # Set parameters
+    atlas_alt.greedy_target = 1000  # Target for initial greedy phase
+    atlas_alt.initial_temp = 50.0
+    atlas_alt.final_temp = 0.1
+    atlas_alt.alpha = 0.98
+    atlas_alt.iterations_per_temp = 500
+    atlas_alt.cluster_penalty_weight = 20.0
+    atlas_alt.max_alternating_iterations = 8
+    atlas_alt.greedy_passes_per_alternation = 2
     
     # Run clustering
-    clusters = atlas.cluster()
+    clusters = atlas_alt.cluster()
     
     # Print results
     logger.info(f"Clustering complete: {len(clusters)} clusters")
     
     # Print performance stats
-    stats = atlas.get_performance_stats()
+    stats = atlas_alt.get_performance_stats()
     for key, value in stats.items():
         logger.info(f"{key}: {value}")
 
