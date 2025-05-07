@@ -106,30 +106,6 @@ class ATLAS:
         # Block ID counter
         self.next_block_id = 0
     
-    def _get_terminal_nodes(self, graph):
-        """Get input and output neurons of a graph"""
-        root_set = pyroaring.BitMap()
-        leaf_set = pyroaring.BitMap()
-        
-        for node in graph.nodes:
-            has_inputs = 0
-            has_outputs = 0
-            
-            for _ in graph._pred[node]:
-                has_inputs = 1
-                break
-                
-            for _ in graph._succ[node]:
-                has_outputs = 1
-                break
-                
-            if has_inputs == 0:
-                root_set.add(node)
-            if has_outputs == 0:
-                leaf_set.add(node)
-                
-        return root_set, leaf_set
-    
     def _get_input_overlap_score(self, block_a, block_b):
         """
         Calculate the input overlap score between two blocks
@@ -305,14 +281,8 @@ class ATLAS:
                 if input_neuron in self.input_to_blocks and block_b_id in self.input_to_blocks[input_neuron]:
                     self.input_to_blocks[input_neuron].remove(block_b_id)
         
-        # Selectively invalidate validation cache
-        keys_to_remove = []
-        for key in list(self.validation_cache.keys()):
-            if block_a_id in key or block_b_id in key:
-                keys_to_remove.append(key)
-        
-        for key in keys_to_remove:
-            del self.validation_cache[key]
+        # invalidate validation cache
+        self.validation_cache.clear()
         
         return new_block_id
     
