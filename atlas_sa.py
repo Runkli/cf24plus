@@ -113,6 +113,7 @@ class ATLAS_SA_Optimizer:
         current_temp = self.initial_temp
         total_iterations = 0
         total_acceptances = 0
+        temperature_attempts = 0
         
         while current_temp > self.final_temp:
             self.stats['temperature_levels'] += 1
@@ -162,6 +163,16 @@ class ATLAS_SA_Optimizer:
             
             # Cool down
             current_temp *= self.alpha
+            if temp_acceptances > 0:
+                temperature_attempts = 0
+
+            if temp_acceptances == 0:
+                temperature_attempts += 1
+
+            if temperature_attempts >= 10:
+                logger.info(f"Stopping search after {temperature_attempts} attempts with no improvement")
+                break
+
         
         # Finalize statistics
         optimization_time = time.time() - start_time
@@ -476,7 +487,7 @@ def main():
     from reader import AdarshaReader
     
     # Load a real SNN model
-    model_name = "LeNet"
+    model_name = "AlexNet"
     model_path = f'../disco_libs/SNN_db/{model_name}'
     conn_file = model_path + '.connection_info.txt' 
     spk_file = model_path + '.spike_info.txt' 
