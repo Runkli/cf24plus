@@ -528,5 +528,177 @@ def main():
         logger.info(f"{key}: {value}")
 
 
+def convert_atlas_to_clusters(final_solution, final_blocks, original_snn, arch):
+    """
+    Convert ATLAS final solution to Clusters object
+    
+    Args:
+        final_solution: Set of block IDs
+        final_blocks: Dictionary mapping block_id -> Block objects
+        original_snn: Original SNN graph
+        arch: Architecture object for validation
+        
+    Returns:
+        Clusters: Clusters object compatible with the generic clustering framework
+    """
+    from generic import Clusters
+    import networkx as nx
+    
+    clusters_obj = Clusters()
+    clusters_obj.arch = arch
+    
+    # Step 1: Create cluster DiGraphs containing only block outputs
+    cluster_digraphs = []
+    neuron_to_cluster = {}
+    
+    for block_id in final_solution:
+        block = final_blocks[block_id]
+        
+        # Create DiGraph for this cluster containing only output neurons
+        cluster_digraph = nx.DiGraph()
+        
+        # Add output neurons to cluster
+        output_neurons = list(block.outputs)  # Convert BitMap to list
+        cluster_digraph.add_nodes_from(output_neurons)
+        
+        # Add edges within this cluster (between output neurons)
+        for neuron in output_neurons:
+            for successor in original_snn.successors(neuron):
+                if successor in output_neurons:  # Both neurons in same cluster
+                    # Copy edge with its attributes
+                    edge_data = original_snn[neuron][successor]
+                    cluster_digraph.add_edge(neuron, successor, **edge_data)
+        
+        cluster_digraphs.append(cluster_digraph)
+        
+        # Build neuron-to-cluster mapping
+        for neuron in output_neurons:
+            neuron_to_cluster[neuron] = cluster_digraph
+    
+    # Step 2: Handle input nodes (nodes with no incoming edges) with bisection
+    def get_terminal_nodes(graph):
+        """Get input and output nodes from graph"""
+        input_nodes = set()
+        output_nodes = set()
+        
+        for node in graph.nodes:
+            if graph.in_degree(node) == 0:
+                input_nodes.add(node)
+            if graph.out_degree(node) == 0:
+                output_nodes.add(node)
+        
+        return input_nodes, output_nodes
+    
+    # Find input nodes that aren't already in any cluster
+    input_nodes, output_nodes = get_terminal_nodes(original_snn)
+    unhandled_input_nodes = []
+    
+    for input_node in input_nodes:
+        if input_node not in neuron_to_cluster:
+            unhandled_input_nodes.append(input_node)
+    
+    # Special handling for input nodes - bisect until they fit
+    if unhandled_input_nodes:
+        special_clusters = [original_snn.subgraph(unhandled_input_nodes)]
+        
+        while special_clusters:
+            cluster = special_clusters.pop()
+            
+            if len(cluster) <= arch.crossbar_size:
+                # Fits in architecture, add to clusters
+                cluster_digraph = nx.DiGraph(cluster)
+                cluster_digraphs.append(cluster_digraph)
+                
+                # Update neuron-to-cluster mapping
+                for neuron in cluster_digraph.nodes:
+                    neuron_to_cluster[neuron] = cluster_digraph
+            else:
+                # Too big, bisect it
+                nodes_list = list(cluster.nodes)
+                half = len(nodes_list) // 2
+                A = nodes_list[:half]
+                B = nodes_list[half:]
+                sA = original_snn.subgraph(A)
+                sB = original_snn.subgraph(B)
+                special_clusters.append(sA)
+                special_clusters.append(sB)
+    
+    # Step 3: Build inter-cluster traffic graph
+    cluster_graph = nx.DiGraph()
+    
+    # Add all clusters as nodes in cluster graph
+    for cluster in cluster_digraphs:
+        cluster_graph.add_node(cluster)
+
+    print(len(cluster_digraphs))
+    print(len(cluster_graph))
+    
+    # Step 4: Calculate inter-cluster traffic
+    for cluster in cluster_digraphs:
+        for neuron in cluster.nodes:
+            # Check predecessors (incoming traffic)
+            for predecessor in original_snn.predecessors(neuron):
+                if predecessor not in neuron_to_cluster:
+                    continue  # Skip if predecessor not in any cluster
+                
+                pred_cluster = neuron_to_cluster[predecessor]
+                if pred_cluster == cluster:
+                    continue  # Skip intra-cluster connections
+                
+                # Get edge traffic from original SNN
+                edge_traffic = original_snn[predecessor][neuron].get('traffic', 1.0)
+                
+                # Add/update inter-cluster edge
+                if cluster_graph.has_edge(pred_cluster, cluster):
+                    cluster_graph[pred_cluster][cluster]['traffic'] += edge_traffic
+                else:
+                    cluster_graph.add_edge(pred_cluster, cluster, traffic=edge_traffic)
+            
+            # Check successors (outgoing traffic)
+            for successor in original_snn.successors(neuron):
+                if successor not in neuron_to_cluster:
+                    continue  # Skip if successor not in any cluster
+                
+                succ_cluster = neuron_to_cluster[successor]
+                if succ_cluster == cluster:
+                    continue  # Skip intra-cluster connections
+                
+                # Get edge traffic from original SNN
+                edge_traffic = original_snn[neuron][successor].get('traffic', 1.0)
+                
+                # Add/update inter-cluster edge
+                if cluster_graph.has_edge(cluster, succ_cluster):
+                    cluster_graph[cluster][succ_cluster]['traffic'] += edge_traffic
+                else:
+                    cluster_graph.add_edge(cluster, succ_cluster, traffic=edge_traffic)
+    
+    # Step 5: Set up Clusters object
+    clusters_obj.cluster_graph = cluster_graph
+    clusters_obj._nodeToClusterGen()  # Generate node-to-cluster mapping
+    
+    return clusters_obj
+
+
+# Usage snippet after running ATLAS:
+"""
+# Run ATLAS clustering
+atlas = ATLAS(snn, arch)
+clusters = atlas.cluster()
+
+# Get final solution and blocks
+final_solution = atlas.get_current_solution()
+final_blocks = atlas.blocks
+
+# Convert to Clusters object (now needs architecture parameter)
+clusters_obj = convert_atlas_to_clusters(final_solution, final_blocks, snn, arch)
+
+# Validate the clustering
+clusters_obj.validate(snn)
+
+# Now you can use clusters_obj with the generic clustering framework
+print(f"Number of clusters: {len(clusters_obj)}")
+"""
+
+
 if __name__ == "__main__":
     main()

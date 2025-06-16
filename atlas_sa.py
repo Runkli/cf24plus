@@ -4,6 +4,7 @@ import random
 import time
 import logging
 import pyroaring
+import pickle
 from copy import deepcopy
 
 logger = logging.getLogger(__name__)
@@ -481,13 +482,19 @@ def main():
     sys.path.append('.')
     
     # Import the clean ATLAS implementation
-    from atlas_base import ATLAS, OptimizedCrossbar, Block
+    from atlas_base import ATLAS, OptimizedCrossbar, Block, convert_atlas_to_clusters
+    from arch.base import Crossbar
         
     # Try to import reader
     from reader import AdarshaReader
+
+    # Create architecture
+    crossbar_size = 1024  # Smaller for demonstration
+    arch = OptimizedCrossbar(crossbar_size)
     
+    '''
     # Load a real SNN model
-    model_name = "AlexNet"
+    model_name = "LeNet"
     model_path = f'../disco_libs/SNN_db/{model_name}'
     conn_file = model_path + '.connection_info.txt' 
     spk_file = model_path + '.spike_info.txt' 
@@ -499,10 +506,6 @@ def main():
     snn = model
     logger.info(f"Loaded {model_name} model with {len(snn.nodes())} neurons and {len(snn.edges())} connections")
         
-    # Create architecture
-    crossbar_size = 1024  # Smaller for demonstration
-    arch = OptimizedCrossbar(crossbar_size)
-    
     # Run initial ATLAS clustering
     logger.info("Running initial ATLAS clustering...")
     atlas = ATLAS(snn, arch)
@@ -552,10 +555,27 @@ def main():
     
     # Run final greedy phase
     final_merges = atlas._run_greedy_phase(max_passes=3)
-    
+
+    # Get solution
     final_solution = atlas.get_current_solution()
-    logger.info(f"Final solution after additional greedy passes: {len(final_solution)} clusters")
-    logger.info(f"Total reduction: {len(initial_solution)} -> {len(final_solution)} clusters")
+    final_blocks = atlas.blocks
+
+    # Convert to Clusters object
+    pickle.dump((final_solution, final_blocks, snn), open("intermediate.obj", "wb"))
+    '''
+
+    final_solution, final_blocks, snn = pickle.load(open("intermediate.obj", "rb"))
+
+    arch = Crossbar(1024)
+    clusters_obj = convert_atlas_to_clusters(final_solution, final_blocks, snn, arch)
+
+    # Validate the clustering
+    clusters_obj.validate(snn)
+
+
+    pickle.dump(clusters_obj, open("solution.obj", "wb"))
+    logger.info(f"Final solution after additional greedy passes: {len(clusters_obj.cluster_graph)} clusters")
+    #logger.info(f"Total reduction: {len(initial_solution)} -> {len(final_solution)} clusters")
 
 
 if __name__ == "__main__":
