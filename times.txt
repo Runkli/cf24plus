@@ -1,4 +1,0 @@
-initial:
-Lap time generate initial clusters: 1.0395109979435802s 
-Lap time make connections: 13.192221795907244s 
-Lap time clusters finished: 31.849610195029527s

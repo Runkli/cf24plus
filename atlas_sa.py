@@ -562,19 +562,24 @@ def main():
 
     # Convert to Clusters object
     pickle.dump((final_solution, final_blocks, snn), open("intermediate.obj", "wb"))
+
     '''
-
     final_solution, final_blocks, snn = pickle.load(open("intermediate.obj", "rb"))
-
     arch = Crossbar(1024)
     clusters_obj = convert_atlas_to_clusters(final_solution, final_blocks, snn, arch)
 
     # Validate the clustering
-    clusters_obj.validate(snn)
+    #clusters_obj.validate(snn)
+    from backends import noxim
 
+    pickle.load(solutions_obj, open("solution.obj", "wb"))
+    #clusters_obj = pickle.load(open("solution.obj", "rb"))
+    #clusters_obj.validate(snn)
 
-    pickle.dump(clusters_obj, open("solution.obj", "wb"))
-    logger.info(f"Final solution after additional greedy passes: {len(clusters_obj.cluster_graph)} clusters")
+    mesh = noxim.NoximMesh(clusters_obj, "mesh_test")
+    
+
+    #logger.info(f"Final solution after additional greedy passes: {len(clusters_obj.cluster_graph)} clusters")
     #logger.info(f"Total reduction: {len(initial_solution)} -> {len(final_solution)} clusters")
 
 

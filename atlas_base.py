@@ -541,7 +541,7 @@ def convert_atlas_to_clusters(final_solution, final_blocks, original_snn, arch):
     Returns:
         Clusters: Clusters object compatible with the generic clustering framework
     """
-    from generic import Clusters
+    from clustering.generic import Clusters
     import networkx as nx
     
     clusters_obj = Clusters()
@@ -623,57 +623,82 @@ def convert_atlas_to_clusters(final_solution, final_blocks, original_snn, arch):
                 special_clusters.append(sA)
                 special_clusters.append(sB)
     
-    # Step 3: Build inter-cluster traffic graph
+    # Step 3: Create cluster index mapping (like KL makeClusters)
+    cluster_to_idx = {}
+    idx_to_cluster = {}
+    for idx, cluster in enumerate(cluster_digraphs):
+        cluster_to_idx[cluster] = idx
+        idx_to_cluster[idx] = cluster
+    
+    # Step 4: Build inter-cluster traffic graph and generate AER traffic
     cluster_graph = nx.DiGraph()
+    aer_traffic = {}
+    conn_weights = {}
     
     # Add all clusters as nodes in cluster graph
-    for cluster in cluster_digraphs:
-        cluster_graph.add_node(cluster)
-
-    print(len(cluster_digraphs))
-    print(len(cluster_graph))
+    for idx in range(len(cluster_digraphs)):
+        cluster_graph.add_node(idx)
     
-    # Step 4: Calculate inter-cluster traffic
-    for cluster in cluster_digraphs:
-        for neuron in cluster.nodes:
-            # Check predecessors (incoming traffic)
-            for predecessor in original_snn.predecessors(neuron):
-                if predecessor not in neuron_to_cluster:
-                    continue  # Skip if predecessor not in any cluster
-                
-                pred_cluster = neuron_to_cluster[predecessor]
-                if pred_cluster == cluster:
-                    continue  # Skip intra-cluster connections
-                
-                # Get edge traffic from original SNN
-                edge_traffic = original_snn[predecessor][neuron].get('traffic', 1.0)
-                
-                # Add/update inter-cluster edge
-                if cluster_graph.has_edge(pred_cluster, cluster):
-                    cluster_graph[pred_cluster][cluster]['traffic'] += edge_traffic
-                else:
-                    cluster_graph.add_edge(pred_cluster, cluster, traffic=edge_traffic)
+    # Step 5: Generate AER traffic by scanning original SNN edges (like KL approach)
+    for neuron in original_snn.nodes():
+        if neuron not in neuron_to_cluster:
+            continue  # Skip neurons not in any cluster
             
-            # Check successors (outgoing traffic)
-            for successor in original_snn.successors(neuron):
-                if successor not in neuron_to_cluster:
-                    continue  # Skip if successor not in any cluster
-                
-                succ_cluster = neuron_to_cluster[successor]
-                if succ_cluster == cluster:
-                    continue  # Skip intra-cluster connections
+        # Check all successors (outgoing edges)
+        for successor in original_snn.successors(neuron):
+            if successor not in neuron_to_cluster:
+                continue  # Skip if successor not in any cluster
+            
+            src_cluster = neuron_to_cluster[neuron]
+            dst_cluster = neuron_to_cluster[successor]
+            
+            # Only process inter-cluster edges
+            if src_cluster != dst_cluster:
+                src_idx = cluster_to_idx[src_cluster]
+                dst_idx = cluster_to_idx[dst_cluster]
                 
                 # Get edge traffic from original SNN
                 edge_traffic = original_snn[neuron][successor].get('traffic', 1.0)
                 
-                # Add/update inter-cluster edge
-                if cluster_graph.has_edge(cluster, succ_cluster):
-                    cluster_graph[cluster][succ_cluster]['traffic'] += edge_traffic
-                else:
-                    cluster_graph.add_edge(cluster, succ_cluster, traffic=edge_traffic)
+                # Add edge to cluster graph
+                if not cluster_graph.has_edge(src_idx, dst_idx):
+                    cluster_graph.add_edge(src_idx, dst_idx, traffic=0)
+                
+                # Update cluster graph traffic
+                cluster_graph[src_idx][dst_idx]['traffic'] += edge_traffic
+                
+                # Update conn_weights (total spikes between clusters)
+                relation = (src_idx, dst_idx)
+                conn_weights[relation] = conn_weights.get(relation, 0) + edge_traffic
+                
+                # Generate AER traffic (distribute traffic across timesteps)
+                # For simplicity, distribute evenly across timesteps based on traffic value
+                traffic_per_timestep = max(1, int(edge_traffic))
+                num_timesteps = max(1, int(edge_traffic / traffic_per_timestep))
+                
+                for timestep in range(num_timesteps):
+                    if timestep not in aer_traffic:
+                        aer_traffic[timestep] = {}
+                    
+                    if relation not in aer_traffic[timestep]:
+                        aer_traffic[timestep][relation] = 0
+                    
+                    aer_traffic[timestep][relation] += traffic_per_timestep
     
-    # Step 5: Set up Clusters object
+    # Step 6: Set up Clusters object (following KL structure)
     clusters_obj.cluster_graph = cluster_graph
+    clusters_obj.aer_traffic = aer_traffic
+    clusters_obj.conn_weights = conn_weights
+    
+    # Create id_to_graph mapping (like the original makeClusters)
+    clusters_obj.id_to_graph = idx_to_cluster
+    
+    # Generate node-to-cluster mapping for validation
+    clusters_obj.node_to_cluster = {}
+    for neuron, cluster in neuron_to_cluster.items():
+        cluster_idx = cluster_to_idx[cluster]
+        clusters_obj.node_to_cluster[neuron] = cluster_idx
+    
     clusters_obj._nodeToClusterGen()  # Generate node-to-cluster mapping
     
     return clusters_obj
@@ -698,7 +723,6 @@ clusters_obj.validate(snn)
 # Now you can use clusters_obj with the generic clustering framework
 print(f"Number of clusters: {len(clusters_obj)}")
 """
-
 
 if __name__ == "__main__":
     main()

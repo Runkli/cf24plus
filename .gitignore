@@ -8,6 +8,9 @@
 # Unignore all dirs
 !*/
 
+*.png
+*.json
+
 carlsim_utils/results/
 carlsim_utils/sims/
 data
