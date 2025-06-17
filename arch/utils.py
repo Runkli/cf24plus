@@ -27,6 +27,30 @@ state = {
         "stage": None,
 }
 
+# Get input and output nodes of a graph
+def getTerminalNodes(DG):
+    DG_root_set = set()
+    DG_leaf_set = set()
+
+    for node in DG.nodes:
+        has_inputs = 0
+        has_outputs = 0
+
+        for _ in DG._pred[node]:
+            has_inputs = 1
+            break
+
+        for _ in DG._succ[node]:
+            has_outputs = 1
+            break
+
+        if has_inputs == 0:
+            DG_root_set.add(node)
+        if has_outputs == 0:
+            DG_leaf_set.add(node)
+
+    return DG_root_set, DG_leaf_set
+
 
 class Solution:
     def __init__(self, A, B=None, cost=0):
@@ -510,29 +534,6 @@ def makeCrossBarGraph(crossbar_size=4):
     return DG
 
 
-# Get input and output nodes of a graph
-def getTerminalNodes(DG):
-    DG_root_set = set()
-    DG_leaf_set = set()
-
-    for node in DG.nodes:
-        has_inputs = 0
-        has_outputs = 0
-
-        for _ in DG._pred[node]:
-            has_inputs = 1
-            break
-
-        for _ in DG._succ[node]:
-            has_outputs = 1
-            break
-
-        if has_inputs == 0:
-            DG_root_set.add(node)
-        if has_outputs == 0:
-            DG_leaf_set.add(node)
-
-    return DG_root_set, DG_leaf_set
 
 
 # TODO: Make this faster please
