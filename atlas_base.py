@@ -5,6 +5,8 @@ import sys
 import time
 import logging
 import pyroaring
+from utils import getTerminalNodes
+from pprint import pprint
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -462,52 +464,22 @@ class ATLAS:
 
 def main():
     """Example usage with a sample SNN"""
-    try:
-        # Try to import reader from the provided code
-        from reader import AdarshaReader
-        
-        # ADARSHA MODELS
-        model_name = "LeNet"
-        model_path = f'../disco_libs/SNN_db/{model_name}'
-        conn_file = model_path + '.connection_info.txt' 
-        spk_file = model_path + '.spike_info.txt' 
-        
-        reader = AdarshaReader()
-        model, aer = reader.read(conn_file, spk_file)
-        reader.addTraffic(model, aer)
-        
-        # Use the model as our SNN
-        snn = model
-        logger.info(f"Loaded {model_name} model with {len(snn.nodes())} neurons and {len(snn.edges())} connections")
-    except ImportError:
-        # If reader is not available, create a synthetic SNN for testing
-        logger.info("Reader not found, creating synthetic SNN for testing")
-        snn = nx.DiGraph()
-        
-        # Create a layered network
-        num_layers = 3
-        neurons_per_layer = [1000, 500, 200]
-        connection_prob = 0.05
-        
-        # Create neurons for each layer
-        neuron_id = 0
-        for layer, layer_size in enumerate(neurons_per_layer):
-            for i in range(layer_size):
-                snn.add_node(neuron_id, layer=layer)
-                neuron_id += 1
-        
-        # Create connections between layers
-        import random
-        for layer in range(len(neurons_per_layer) - 1):
-            source_neurons = [n for n, d in snn.nodes(data=True) if d['layer'] == layer]
-            target_neurons = [n for n, d in snn.nodes(data=True) if d['layer'] == layer + 1]
-            
-            for source in source_neurons:
-                for target in target_neurons:
-                    if random.random() < connection_prob:
-                        snn.add_edge(source, target, traffic=random.randint(1, 10))
-        
-        logger.info(f"Created synthetic SNN with {len(snn.nodes())} neurons and {len(snn.edges())} connections")
+    # Try to import reader from the provided code
+    from reader import AdarshaReader
+    
+    # ADARSHA MODELS
+    model_name = "LeNet"
+    model_path = f'../disco_libs/SNN_db/{model_name}'
+    conn_file = model_path + '.connection_info.txt' 
+    spk_file = model_path + '.spike_info.txt' 
+    
+    reader = AdarshaReader()
+    model, aer = reader.read(conn_file, spk_file)
+    reader.addTraffic(model, aer)
+    
+    # Use the model as our SNN
+    snn = model
+    logger.info(f"Loaded {model_name} model with {len(snn.nodes())} neurons and {len(snn.edges())} connections")
     
     # Create the optimized crossbar architecture
     crossbar_size = 1024
@@ -528,7 +500,7 @@ def main():
         logger.info(f"{key}: {value}")
 
 
-def convert_atlas_to_clusters(final_solution, final_blocks, original_snn, arch):
+def convert_atlas_to_clusters(final_solution, final_blocks, original_snn, arch, aer):
     """
     Convert ATLAS final solution to Clusters object
     
@@ -541,7 +513,7 @@ def convert_atlas_to_clusters(final_solution, final_blocks, original_snn, arch):
     Returns:
         Clusters: Clusters object compatible with the generic clustering framework
     """
-    from clustering.generic import Clusters
+    from generic import Clusters
     import networkx as nx
     
     clusters_obj = Clusters()
@@ -551,6 +523,8 @@ def convert_atlas_to_clusters(final_solution, final_blocks, original_snn, arch):
     cluster_digraphs = []
     neuron_to_cluster = {}
     
+    print(len(final_solution))
+    print(len(final_blocks))
     for block_id in final_solution:
         block = final_blocks[block_id]
         
@@ -576,21 +550,8 @@ def convert_atlas_to_clusters(final_solution, final_blocks, original_snn, arch):
             neuron_to_cluster[neuron] = cluster_digraph
     
     # Step 2: Handle input nodes (nodes with no incoming edges) with bisection
-    def get_terminal_nodes(graph):
-        """Get input and output nodes from graph"""
-        input_nodes = set()
-        output_nodes = set()
-        
-        for node in graph.nodes:
-            if graph.in_degree(node) == 0:
-                input_nodes.add(node)
-            if graph.out_degree(node) == 0:
-                output_nodes.add(node)
-        
-        return input_nodes, output_nodes
-    
     # Find input nodes that aren't already in any cluster
-    input_nodes, output_nodes = get_terminal_nodes(original_snn)
+    input_nodes, output_nodes = getTerminalNodes(original_snn)
     unhandled_input_nodes = []
     
     for input_node in input_nodes:
@@ -623,81 +584,44 @@ def convert_atlas_to_clusters(final_solution, final_blocks, original_snn, arch):
                 special_clusters.append(sA)
                 special_clusters.append(sB)
     
-    # Step 3: Create cluster index mapping (like KL makeClusters)
-    cluster_to_idx = {}
-    idx_to_cluster = {}
-    for idx, cluster in enumerate(cluster_digraphs):
-        cluster_to_idx[cluster] = idx
-        idx_to_cluster[idx] = cluster
-    
+
     # Step 4: Build inter-cluster traffic graph and generate AER traffic
     cluster_graph = nx.DiGraph()
     aer_traffic = {}
     conn_weights = {}
     
     # Add all clusters as nodes in cluster graph
-    for idx in range(len(cluster_digraphs)):
-        cluster_graph.add_node(idx)
+    for cluster in cluster_digraphs:
+        cluster_graph.add_node(cluster)
     
+    print(len(cluster_graph))
     # Step 5: Generate AER traffic by scanning original SNN edges (like KL approach)
-    for neuron in original_snn.nodes():
-        if neuron not in neuron_to_cluster:
-            continue  # Skip neurons not in any cluster
+    for src in aer.keys():
+        src_cluster = neuron_to_cluster[src]
+        for dst in original_snn.successors(src):
+            dst_cluster = neuron_to_cluster[dst]
+            if src_cluster == dst_cluster:
+                continue
             
-        # Check all successors (outgoing edges)
-        for successor in original_snn.successors(neuron):
-            if successor not in neuron_to_cluster:
-                continue  # Skip if successor not in any cluster
-            
-            src_cluster = neuron_to_cluster[neuron]
-            dst_cluster = neuron_to_cluster[successor]
-            
-            # Only process inter-cluster edges
-            if src_cluster != dst_cluster:
-                src_idx = cluster_to_idx[src_cluster]
-                dst_idx = cluster_to_idx[dst_cluster]
-                
-                # Get edge traffic from original SNN
-                edge_traffic = original_snn[neuron][successor].get('traffic', 1.0)
-                
-                # Add edge to cluster graph
-                if not cluster_graph.has_edge(src_idx, dst_idx):
-                    cluster_graph.add_edge(src_idx, dst_idx, traffic=0)
-                
-                # Update cluster graph traffic
-                cluster_graph[src_idx][dst_idx]['traffic'] += edge_traffic
-                
-                # Update conn_weights (total spikes between clusters)
-                relation = (src_idx, dst_idx)
-                conn_weights[relation] = conn_weights.get(relation, 0) + edge_traffic
-                
-                # Generate AER traffic (distribute traffic across timesteps)
-                # For simplicity, distribute evenly across timesteps based on traffic value
-                traffic_per_timestep = max(1, int(edge_traffic))
-                num_timesteps = max(1, int(edge_traffic / traffic_per_timestep))
-                
-                for timestep in range(num_timesteps):
-                    if timestep not in aer_traffic:
-                        aer_traffic[timestep] = {}
-                    
-                    if relation not in aer_traffic[timestep]:
-                        aer_traffic[timestep][relation] = 0
-                    
-                    aer_traffic[timestep][relation] += traffic_per_timestep
-    
+            relation = (src_cluster, dst_cluster)
+            cluster_graph.add_edge(*relation)
+            # get traffic from original snn
+            traffic = aer[src]['ts']
+
+            for timestep in traffic:
+                aer_traffic.setdefault(timestep, {}).setdefault(relation, 0)
+                aer_traffic[timestep][relation] += 1
+                conn_weights[relation] = conn_weights.get(relation, 0) + 1
+
     # Step 6: Set up Clusters object (following KL structure)
     clusters_obj.cluster_graph = cluster_graph
     clusters_obj.aer_traffic = aer_traffic
     clusters_obj.conn_weights = conn_weights
     
-    # Create id_to_graph mapping (like the original makeClusters)
-    clusters_obj.id_to_graph = idx_to_cluster
-    
     # Generate node-to-cluster mapping for validation
     clusters_obj.node_to_cluster = {}
     for neuron, cluster in neuron_to_cluster.items():
-        cluster_idx = cluster_to_idx[cluster]
-        clusters_obj.node_to_cluster[neuron] = cluster_idx
+        clusters_obj.node_to_cluster[neuron] = cluster
     
     clusters_obj._nodeToClusterGen()  # Generate node-to-cluster mapping
     

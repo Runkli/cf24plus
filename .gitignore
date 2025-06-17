@@ -10,6 +10,7 @@
 
 *.png
 *.json
+*.txt
 
 carlsim_utils/results/
 carlsim_utils/sims/

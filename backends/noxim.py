@@ -15,7 +15,121 @@ class Noxim(Backend):
     def __init__(self, clusters, fileprefix):
         super().__init__(clusters, fileprefix)
 
-        self.noxim_config_template = \
+        print(NOXIM_CONFIG_TEMPLATE)
+
+    def _codegen(self):
+        print("Calling codegen from class Noxim")
+
+
+class NoximMesh(Noxim):
+    def _codegen(self):
+        super()._codegen()
+        print("Calling codegen from class Noxim Mesh")
+        self.generateTrafficFiles()
+        self.generateConfig()
+
+
+    def generateTrafficFiles(self):
+        fileprefix = self.fileprefix
+        clusters = self.clusters
+        
+        # Create mapping from DiGraph objects to integer IDs
+        cluster_to_id = {}
+        id_to_cluster = {}
+        
+        # Assign IDs to clusters (0 to n-1)
+        for i, cluster_node in enumerate(clusters.cluster_graph.nodes):
+            cluster_to_id[cluster_node] = i
+            id_to_cluster[i] = cluster_node
+        
+        print(f"Created mapping for {len(cluster_to_id)} clusters")
+        
+        # Generate bus config file
+        bus_config_path = fileprefix + "_bus_config.txt"
+        print(bus_config_path)
+        bus_config_list = []
+        
+        for src_cluster in clusters.cluster_graph.nodes:
+            src_id = cluster_to_id[src_cluster]
+            dst_clusters = clusters.cluster_graph.successors(src_cluster)
+            dst_ids = [str(cluster_to_id[dst]) for dst in dst_clusters]
+            dst_txt = " ".join(dst_ids)
+            
+            if dst_txt == "":
+                continue
+            
+            txt = f"{src_id} {dst_txt}"
+            bus_config_list.append(txt)
+        
+        bus_config_txt = "\n".join(bus_config_list)
+        with open(bus_config_path, "w") as f:
+            f.write(bus_config_txt)
+        
+        # Generate connection weights file
+        conn_weights_path = fileprefix + "_conn_weights.txt"
+        conn_weights_list = []
+        print(conn_weights_path)
+        
+        for (src_cluster, dst_cluster), spk in clusters.conn_weights.items():
+            src_id = cluster_to_id[src_cluster]
+            dst_id = cluster_to_id[dst_cluster]
+            txt = f"{src_id}; {dst_id}; {spk}"
+            conn_weights_list.append(txt)
+        
+        conn_weights_txt = "\n".join(conn_weights_list)
+        with open(conn_weights_path, "w") as f:
+            f.write(conn_weights_txt)
+        
+        # Generate traffic file (with count = 1)
+        traffic_path = fileprefix + "_traffic.txt"
+        traffic_list = []
+        print(traffic_path)
+        
+        aer_traffic = dict(sorted(clusters.aer_traffic.items()))
+        for spktime, conns in aer_traffic.items():
+            for (src_cluster, dst_cluster), spkcount in conns.items():
+                src_id = cluster_to_id[src_cluster]
+                dst_id = cluster_to_id[dst_cluster]
+                txt = f"{spktime}; {src_id}; {dst_id}; 1"
+                traffic_list.append(txt)
+        
+        traffic_txt = "\n".join(traffic_list)
+        with open(traffic_path, "w") as f:
+            f.write(traffic_txt)
+        
+        # Generate full traffic file (with actual spike counts)
+        traffic_path = fileprefix + "_traffic_full.txt"
+        traffic_list = []
+        print(traffic_path)
+        
+        aer_traffic = dict(sorted(clusters.aer_traffic.items()))
+        for spktime, conns in aer_traffic.items():
+            for (src_cluster, dst_cluster), spkcount in conns.items():
+                src_id = cluster_to_id[src_cluster]
+                dst_id = cluster_to_id[dst_cluster]
+                txt = f"{spktime}; {src_id}; {dst_id}; {spkcount}"
+                traffic_list.append(txt)
+        
+        traffic_txt = "\n".join(traffic_list)
+        with open(traffic_path, "w") as f:
+            f.write(traffic_txt)
+        
+        # Store the mapping for potential use in other methods
+        self.cluster_to_id = cluster_to_id
+        self.id_to_cluster = id_to_cluster
+
+
+    def generateConfig(self):
+        x = 4
+        y = 4
+        config_str = NOXIM_CONFIG_TEMPLATE.format(x, y, "test_file")
+        print(config_str)
+        pass
+    
+
+
+
+NOXIM_CONFIG_TEMPLATE = \
 '''
 # NOC & WIRED CONFIGURATION
 #
@@ -181,7 +295,7 @@ traffic_distribution: TRAFFIC_TRACE_BASED
 # when traffic table based is specified, use the following
 # configuration file
 traffic_table_filename: ""
-traffic_trace_filename: "{3}" # traffic file here
+traffic_trace_filename: "{2}" # traffic file here
 switch_config_filename: ""
 
 switch_delay_ps: 8500
@@ -203,82 +317,3 @@ output_mode: NORMAL_MODE
 # output_mode: NORMAL_MODE
 output_filename: "out_tmp.txt"
 '''
-
-    def _codegen(self):
-        print("Calling codegen from class Noxim")
-
-
-class NoximMesh(Noxim):
-    def _codegen(self):
-        super()._codegen()
-        print("Calling codegen from class Noxim Mesh")
-        self.generateTrafficFiles()
-        self.generateConfig()
-
-    def generateTrafficFiles(self):
-        fileprefix = self.fileprefix
-        clusters = self.clusters
-
-        bus_config_path = fileprefix + "_bus_config.txt"
-        bus_config_list = []
-        for src in clusters.cluster_graph.nodes:
-            dst = clusters.cluster_graph.successors(src)
-            dst_txt = " ".join([str(d) for d in dst])
-            if dst_txt == "":
-                continue
-
-            txt = f"{src} {dst_txt}"
-            bus_config_list.append(txt)
-
-        bus_config_txt = "\n".join(bus_config_list)
-        with open(bus_config_path, "w") as f:
-            f.write(bus_config_txt)
-
-        conn_weights_path = fileprefix + "_conn_weights.txt"
-        conn_weights_list = []
-        for (src, dst), spk in clusters.conn_weights.items():
-            txt = f"{src}; {dst}; {spk}"
-            conn_weights_list.append(txt)
-
-        conn_weights_txt = "\n".join(conn_weights_list)
-        with open(conn_weights_path, "w") as f:
-            f.write(conn_weights_txt)
-
-        traffic_path = fileprefix + "_traffic.txt"
-        traffic_list = []
-
-        aer_traffic = dict(sorted(clusters.aer_traffic.items()))
-        for spktime, conns in aer_traffic.items():
-            for (src, dst), spkcount in conns.items():
-                txt = f"{spktime}; {src}; {dst}; 1" #{spkcount}"
-                traffic_list.append(txt)
-
-        traffic_txt = "\n".join(traffic_list)
-        with open(traffic_path, "w") as f:
-            f.write(traffic_txt)
-        
-        traffic_path = fileprefix + "_traffic_full.txt"
-        traffic_list = []
-
-        aer_traffic = dict(sorted(clusters.aer_traffic.items()))
-        for spktime, conns in aer_traffic.items():
-            for (src, dst), spkcount in conns.items():
-                txt = f"{spktime}; {src}; {dst}; {spkcount}"
-                traffic_list.append(txt)
-
-        traffic_txt = "\n".join(traffic_list)
-        with open(traffic_path, "w") as f:
-            f.write(traffic_txt)
-
-
-
-    def generateConfig(self):
-        x = 4
-        y = 4
-        config_str = self.noxim_config_template.format(x, y, "test_file")
-        print(config_str)
-        pass
-    
-
-
-

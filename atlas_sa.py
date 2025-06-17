@@ -492,7 +492,6 @@ def main():
     crossbar_size = 1024  # Smaller for demonstration
     arch = OptimizedCrossbar(crossbar_size)
     
-    '''
     # Load a real SNN model
     model_name = "LeNet"
     model_path = f'../disco_libs/SNN_db/{model_name}'
@@ -505,6 +504,8 @@ def main():
     
     snn = model
     logger.info(f"Loaded {model_name} model with {len(snn.nodes())} neurons and {len(snn.edges())} connections")
+
+    '''
         
     # Run initial ATLAS clustering
     logger.info("Running initial ATLAS clustering...")
@@ -563,17 +564,17 @@ def main():
     # Convert to Clusters object
     pickle.dump((final_solution, final_blocks, snn), open("intermediate.obj", "wb"))
 
-    '''
     final_solution, final_blocks, snn = pickle.load(open("intermediate.obj", "rb"))
     arch = Crossbar(1024)
-    clusters_obj = convert_atlas_to_clusters(final_solution, final_blocks, snn, arch)
+    clusters_obj = convert_atlas_to_clusters(final_solution, final_blocks, snn, arch, aer)
+    pickle.dump(clusters_obj, open("solution.obj", "wb"))
+    '''
 
     # Validate the clustering
     #clusters_obj.validate(snn)
     from backends import noxim
 
-    pickle.load(solutions_obj, open("solution.obj", "wb"))
-    #clusters_obj = pickle.load(open("solution.obj", "rb"))
+    clusters_obj = pickle.load(open("solution.obj", "rb"))
     #clusters_obj.validate(snn)
 
     mesh = noxim.NoximMesh(clusters_obj, "mesh_test")
