@@ -6,6 +6,9 @@ import logging
 import pyroaring
 import pickle
 from copy import deepcopy
+import argparse
+import os
+from utils import prune_neurons
 
 logger = logging.getLogger(__name__)
 
@@ -476,6 +479,7 @@ class ATLAS_SA_Optimizer:
         print("="*60)
 
 
+
 def main():
     """Example usage of the SA optimizer with ATLAS"""
     import sys
@@ -492,92 +496,107 @@ def main():
     crossbar_size = 1024  # Smaller for demonstration
     arch = OptimizedCrossbar(crossbar_size)
     
-    # Load a real SNN model
-    model_name = "LeNet"
-    model_path = f'../disco_libs/SNN_db/{model_name}'
-    conn_file = model_path + '.connection_info.txt' 
-    spk_file = model_path + '.spike_info.txt' 
-    
-    reader = AdarshaReader()
-    model, aer = reader.read(conn_file, spk_file)
-    reader.addTraffic(model, aer)
-    
-    snn = model
-    logger.info(f"Loaded {model_name} model with {len(snn.nodes())} neurons and {len(snn.edges())} connections")
+    # ARGPARSE
 
-    '''
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_path', required=True, type=str, help='Model path')
+    parser.add_argument('--model_name', required=True, type=str, help='Model name (without .connection/spike_info.txt)')
+    parser.add_argument('--output_path', required=True, type=str, help='Output path for results')
+    parser.add_argument('--prune', type=float, default=0.0, help='Optional prune fraction (default: 0.0)')
+
+    args = parser.parse_args()
+
+    model_name = args.model_name
+
+    results_path = os.path.join(args.output_path, f"NGC_{model_name}") 
+    os.makedirs(results_path, exist_ok=True)
+
+    cluster_obj_filepath = os.path.join(results_path, "clusters.obj") 
+
+    if not os.path.exists(cluster_obj_filepath):
+        # Load a real SNN model
+        model_path = os.path.join(args.model_path, model_name)
+
+        conn_file = model_path + '.connection_info.txt' 
+        spk_file = model_path + '.spike_info.txt' 
         
-    # Run initial ATLAS clustering
-    logger.info("Running initial ATLAS clustering...")
-    atlas = ATLAS(snn, arch)
-    
-    # Run greedy clustering to a moderate target
-    atlas._create_minimum_blocks()
-    atlas._build_atlas_graph()
-    
-    # Run limited greedy phase to create starting solution for SA
-    initial_merges = atlas._run_greedy_phase(target=1000)  # Target 1000 clusters
-    
-    logger.info(f"Initial greedy phase completed with {initial_merges} merges")
-    
-    # Get current solution and blocks
-    initial_solution = atlas.get_current_solution()
-    initial_blocks = atlas.blocks.copy()
-    
-    logger.info(f"Initial solution has {len(initial_solution)} clusters")
-    
-    # Create SA optimizer
-    sa_optimizer = ATLAS_SA_Optimizer(
-        initial_temp=50.0,
-        final_temp=0.1,
-        alpha=0.95,
-        iterations_per_temp=600,
-        cluster_penalty_weight=15.0,
-        neighbor_sample_size=50
-    )
-    
-    # Run SA optimization
-    logger.info("Running SA optimization...")
-    optimized_solution, optimized_blocks, sa_stats = sa_optimizer.optimize(
-        initial_blocks, initial_solution, arch
-    )
-    
-    # Print results
-    logger.info("SA Optimization Results:")
-    for key, value in sa_stats.items():
-        logger.info(f"  {key}: {value}")
-    
-    # Continue with additional greedy phase if desired
-    logger.info("Running additional greedy phase on SA results...")
-    
-    # Update ATLAS with SA results
-    atlas.blocks = optimized_blocks
-    atlas.update_graph_from_solution(optimized_solution)
-    
-    # Run final greedy phase
-    final_merges = atlas._run_greedy_phase(max_passes=3)
+        reader = AdarshaReader()
+        model, aer = reader.read(conn_file, spk_file)
+        reader.addTraffic(model, aer)
+        
+        prune_frac = args.prune
+        prune_neurons(model, crossbar_size, prune_frac)
+        snn = model
+        logger.info(f"Loaded {model_name} model with {len(snn.nodes())} neurons and {len(snn.edges())} connections")
+            
+        # Run initial ATLAS clustering
+        logger.info("Running initial ATLAS clustering...")
+        atlas = ATLAS(snn, arch)
+        
+        # Run greedy clustering to a moderate target
+        atlas._create_minimum_blocks()
+        atlas._build_atlas_graph()
+        
+        # Run limited greedy phase to create starting solution for SA
+        initial_merges = atlas._run_greedy_phase(target=1000)  # Target 1000 clusters
+        
+        logger.info(f"Initial greedy phase completed with {initial_merges} merges")
+        
+        # Get current solution and blocks
+        initial_solution = atlas.get_current_solution()
+        initial_blocks = atlas.blocks.copy()
+        
+        logger.info(f"Initial solution has {len(initial_solution)} clusters")
+        
+        # Create SA optimizer
+        sa_optimizer = ATLAS_SA_Optimizer(
+            initial_temp=50.0,
+            final_temp=0.1,
+            alpha=0.95,
+            iterations_per_temp=600,
+            cluster_penalty_weight=15.0,
+            neighbor_sample_size=50
+        )
+        
+        # Run SA optimization
+        logger.info("Running SA optimization...")
+        optimized_solution, optimized_blocks, sa_stats = sa_optimizer.optimize(
+            initial_blocks, initial_solution, arch
+        )
+        
+        # Print results
+        logger.info("SA Optimization Results:")
+        for key, value in sa_stats.items():
+            logger.info(f"  {key}: {value}")
+        
+        # Continue with additional greedy phase if desired
+        logger.info("Running additional greedy phase on SA results...")
+        
+        # Update ATLAS with SA results
+        atlas.blocks = optimized_blocks
+        atlas.update_graph_from_solution(optimized_solution)
+        
+        # Run final greedy phase
+        final_merges = atlas._run_greedy_phase(max_passes=3)
 
-    # Get solution
-    final_solution = atlas.get_current_solution()
-    final_blocks = atlas.blocks
+        # Get solution
+        final_solution = atlas.get_current_solution()
+        final_blocks = atlas.blocks
 
-    # Convert to Clusters object
-    pickle.dump((final_solution, final_blocks, snn), open("intermediate.obj", "wb"))
-
-    final_solution, final_blocks, snn = pickle.load(open("intermediate.obj", "rb"))
-    arch = Crossbar(1024)
-    clusters_obj = convert_atlas_to_clusters(final_solution, final_blocks, snn, arch, aer)
-    pickle.dump(clusters_obj, open("solution.obj", "wb"))
-    '''
+        # Convert to Clusters object
+        arch = Crossbar(1024)
+        clusters_obj = convert_atlas_to_clusters(final_solution, final_blocks, snn, arch, aer)
+        pickle.dump(clusters_obj, open(cluster_obj_filepath, "wb"))
 
     # Validate the clustering
     #clusters_obj.validate(snn)
     from backends import noxim
 
-    clusters_obj = pickle.load(open("solution.obj", "rb"))
+    clusters_obj = pickle.load(open(cluster_obj_filepath, "rb"))
     #clusters_obj.validate(snn)
 
-    mesh = noxim.NoximMesh(clusters_obj, "mesh_test")
+    mesh = noxim.NoximMesh(clusters_obj, results_path)
+    mesh.codegen()
     
 
     #logger.info(f"Final solution after additional greedy passes: {len(clusters_obj.cluster_graph)} clusters")

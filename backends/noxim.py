@@ -2,6 +2,8 @@ import pickle
 import networkx as nx
 from copy import deepcopy
 import sys
+import os
+import re
 
 sys.path.append("..")
 
@@ -12,25 +14,20 @@ from arch.base import Crossbar
 from backends.generic_backend import Backend
 
 class Noxim(Backend):
-    def __init__(self, clusters, fileprefix):
-        super().__init__(clusters, fileprefix)
-
-        print(NOXIM_CONFIG_TEMPLATE)
-
-    def _codegen(self):
+    def codegen(self):
         print("Calling codegen from class Noxim")
 
 
 class NoximMesh(Noxim):
-    def _codegen(self):
-        super()._codegen()
+    def codegen(self):
         print("Calling codegen from class Noxim Mesh")
         self.generateTrafficFiles()
-        self.generateConfig()
-
 
     def generateTrafficFiles(self):
-        fileprefix = self.fileprefix
+        match = re.search(r'NGC_([A-Za-z]+)', self.outputpath)
+        model_name = match.group(1) if match else "model"
+
+        fileprefix = os.path.join(self.outputpath, model_name) 
         clusters = self.clusters
         
         # Create mapping from DiGraph objects to integer IDs

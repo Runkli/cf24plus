@@ -12,18 +12,15 @@ from arch.base import Crossbar
 from abc import ABC, abstractmethod
 
 class Backend(ABC):
-    def __init__(self, clusters: Clusters, fileprefix: str):
+    def __init__(self, clusters: Clusters, output_path: str):
         # validate object
         assert isinstance(clusters, Clusters), f"Backend codegen received {type(clusters)} instead of type Clusters"
-        assert isinstance(fileprefix, str), "fileprefix must be of type string"
-        self.fileprefix = fileprefix
+        assert isinstance(output_path, str), "fileprefix must be of type string"
+        self.outputpath = output_path
         self.clusters = clusters
 
-        #clusters.validate()
-        self._codegen()
-
     @abstractmethod
-    def _codegen(self):
+    def codegen(self):
         pass
 
 
