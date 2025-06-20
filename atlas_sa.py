@@ -508,7 +508,7 @@ def main():
 
     model_name = args.model_name
 
-    results_path = os.path.join(args.output_path, f"NGC_{model_name}") 
+    results_path = os.path.join(args.output_path, f"NGC_{model_name}wATLAS") 
     os.makedirs(results_path, exist_ok=True)
 
     cluster_obj_filepath = os.path.join(results_path, "clusters.obj") 
@@ -596,7 +596,7 @@ def main():
     #clusters_obj.validate(snn)
 
     mesh = noxim.NoximMesh(clusters_obj, results_path)
-    mesh.codegen()
+    mesh.run()
     
 
     #logger.info(f"Final solution after additional greedy passes: {len(clusters_obj.cluster_graph)} clusters")

@@ -4,6 +4,7 @@ from copy import deepcopy
 import sys
 import os
 import re
+import math
 
 sys.path.append("..")
 
@@ -12,13 +13,36 @@ from generic import GenericCluster, Clusters
 # should be related to architecture, for now we assume crossbar only
 from arch.base import Crossbar
 from backends.generic_backend import Backend
+import importlib
+
+simulator_path="/home/ilknur/noc/mapper/"
+
+sys.path.append(simulator_path)
+import mabf
+
+
 
 class Noxim(Backend):
+    def __init__(self, clusters_obj, results_path):
+        super().__init__(clusters_obj, results_path)
+        
+        # figure out mesh size
+        self.num_rows, self.num_cols, _ = closest_factors(len(clusters_obj))
+
     def codegen(self):
         print("Calling codegen from class Noxim")
 
 
 class NoximMesh(Noxim):
+    def run(self):
+        self.codegen()
+
+        match = re.search(r'NGC_([A-Za-z]+)', self.outputpath)
+        model_name = match.group(1) if match else "model"
+        fileprefix = os.path.join(self.outputpath, model_name) 
+
+        mabf.execute_mesh(fileprefix, self.num_rows, self.num_cols)
+
     def codegen(self):
         print("Calling codegen from class Noxim Mesh")
         self.generateTrafficFiles()
@@ -314,3 +338,35 @@ output_mode: NORMAL_MODE
 # output_mode: NORMAL_MODE
 output_filename: "out_tmp.txt"
 '''
+
+def closest_factors(target, allow_overshoot=True):
+    sqrt_target = math.sqrt(target)
+    base = int(sqrt_target)
+    
+    best_diff = float('inf')
+    best_result = None
+    
+    # Check exact factors first
+    for a in range(1, base + 1):
+        if target % a == 0:
+            b = target // a
+            if a <= b:  # Avoid duplicates
+                diff = b - a
+                if diff < best_diff:
+                    best_diff = diff
+                    best_result = (a, b, target)
+    
+    # If allowing overshoot, check nearby rectangles
+    if allow_overshoot:
+        search_range = max(5, int(sqrt_target * 0.2))
+        for a in range(max(1, base - search_range), base + search_range + 1):
+            b = (target + a - 1) // a  # Ceiling division
+            product = a * b
+            if product >= target:
+                diff = abs(a - b)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_result = (min(a, b), max(a, b), product)
+    
+    return best_result
+
