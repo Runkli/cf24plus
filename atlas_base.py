@@ -597,7 +597,9 @@ def convert_atlas_to_clusters(final_solution, final_blocks, original_snn, arch, 
     print(len(cluster_graph))
     # Step 5: Generate AER traffic by scanning original SNN edges (like KL approach)
     for src in aer.keys():
-        src_cluster = neuron_to_cluster[src]
+        src_cluster = neuron_to_cluster.get(src, None)
+        if src_cluster is None:
+            continue
         for dst in original_snn.successors(src):
             dst_cluster = neuron_to_cluster[dst]
             if src_cluster == dst_cluster:

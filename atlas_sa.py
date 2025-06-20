@@ -161,7 +161,7 @@ class ATLAS_SA_Optimizer:
                         self.stats['best_quality_found'] = best_quality
                         self.stats['best_solution_found'] = set(best_solution)
                         
-                        logger.info(f"New best solution: {len(best_solution)} clusters, quality: {best_quality:.4f}")
+                        #logger.info(f"New best solution: {len(best_solution)} clusters, quality: {best_quality:.4f}")
             
             logger.info(f"Temperature {current_temp:.2f}: {temp_acceptances}/{self.iterations_per_temp} accepted")
             
@@ -503,17 +503,35 @@ def main():
     parser.add_argument('--model_name', required=True, type=str, help='Model name (without .connection/spike_info.txt)')
     parser.add_argument('--output_path', required=True, type=str, help='Output path for results')
     parser.add_argument('--prune', type=float, default=0.0, help='Optional prune fraction (default: 0.0)')
+    parser.add_argument('--meta', action='store_true', help='Use meta heuristic')
+    parser.add_argument('--greedy_target', type=int, default=0, help='Greedy target before enabling metaheuristic')
+
+    parser.add_argument('--override', action='store_true', help='Overwrite saved cluster file')
 
     args = parser.parse_args()
 
     model_name = args.model_name
+    META = args.meta
+    greedy_target = 1
 
-    results_path = os.path.join(args.output_path, f"NGC_{model_name}wATLAS") 
+    experiment_name = f"NGC_{model_name}wATLAS"
+    if not META and args.greedy_target:
+        print("Note: --meta flag not provided, --greedy_target flag being ignored")
+
+    if META:
+        if not args.greedy_target:
+            print("Target for greedy pass (--greedy_target) must be provided when --meta flag is used")
+            exit(1)
+
+        experiment_name += "META"
+        greedy_target = args.greedy_target
+
+    results_path = os.path.join(args.output_path, experiment_name) 
     os.makedirs(results_path, exist_ok=True)
 
     cluster_obj_filepath = os.path.join(results_path, "clusters.obj") 
 
-    if not os.path.exists(cluster_obj_filepath):
+    if not os.path.exists(cluster_obj_filepath) or args.override:
         # Load a real SNN model
         model_path = os.path.join(args.model_path, model_name)
 
@@ -538,46 +556,49 @@ def main():
         atlas._build_atlas_graph()
         
         # Run limited greedy phase to create starting solution for SA
-        initial_merges = atlas._run_greedy_phase(target=1000)  # Target 1000 clusters
+        initial_merges = atlas._run_greedy_phase(target=greedy_target)  # Target 1000 clusters
         
         logger.info(f"Initial greedy phase completed with {initial_merges} merges")
         
-        # Get current solution and blocks
-        initial_solution = atlas.get_current_solution()
-        initial_blocks = atlas.blocks.copy()
-        
-        logger.info(f"Initial solution has {len(initial_solution)} clusters")
-        
-        # Create SA optimizer
-        sa_optimizer = ATLAS_SA_Optimizer(
-            initial_temp=50.0,
-            final_temp=0.1,
-            alpha=0.95,
-            iterations_per_temp=600,
-            cluster_penalty_weight=15.0,
-            neighbor_sample_size=50
-        )
-        
-        # Run SA optimization
-        logger.info("Running SA optimization...")
-        optimized_solution, optimized_blocks, sa_stats = sa_optimizer.optimize(
-            initial_blocks, initial_solution, arch
-        )
-        
-        # Print results
-        logger.info("SA Optimization Results:")
-        for key, value in sa_stats.items():
-            logger.info(f"  {key}: {value}")
-        
-        # Continue with additional greedy phase if desired
-        logger.info("Running additional greedy phase on SA results...")
-        
-        # Update ATLAS with SA results
-        atlas.blocks = optimized_blocks
-        atlas.update_graph_from_solution(optimized_solution)
-        
-        # Run final greedy phase
-        final_merges = atlas._run_greedy_phase(max_passes=3)
+        if META:
+            # Get current solution and blocks
+            initial_solution = atlas.get_current_solution()
+            initial_blocks = atlas.blocks.copy()
+            
+            logger.info(f"Initial solution has {len(initial_solution)} clusters")
+            
+            # Create SA optimizer
+            sa_optimizer = ATLAS_SA_Optimizer(
+                initial_temp=50.0,
+                final_temp=0.1,
+                alpha=0.95,
+                iterations_per_temp=600,
+                cluster_penalty_weight=15.0,
+                neighbor_sample_size=50
+            )
+            
+            # Run SA optimization
+            logger.info("Running SA optimization...")
+            optimized_solution, optimized_blocks, sa_stats = sa_optimizer.optimize(
+                initial_blocks, initial_solution, arch
+            )
+            
+            # Print results
+            logger.info("SA Optimization Results:")
+            for key, value in sa_stats.items():
+                if key == "best_solution_found":
+                    continue
+                logger.info(f"  {key}: {value}")
+            
+            # Continue with additional greedy phase if desired
+            logger.info("Running additional greedy phase on SA results...")
+            
+            # Update ATLAS with SA results
+            atlas.blocks = optimized_blocks
+            atlas.update_graph_from_solution(optimized_solution)
+            
+            # Run final greedy phase
+            final_merges = atlas._run_greedy_phase(max_passes=3)
 
         # Get solution
         final_solution = atlas.get_current_solution()
@@ -593,10 +614,11 @@ def main():
     from backends import noxim
 
     clusters_obj = pickle.load(open(cluster_obj_filepath, "rb"))
+    print(clusters_obj)
     #clusters_obj.validate(snn)
 
     mesh = noxim.NoximMesh(clusters_obj, results_path)
-    mesh.run()
+    #mesh.run()
     
 
     #logger.info(f"Final solution after additional greedy passes: {len(clusters_obj.cluster_graph)} clusters")
